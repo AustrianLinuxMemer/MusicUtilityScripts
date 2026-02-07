@@ -5,16 +5,18 @@
 # licensed to you under the terms of the LGPL, see LICENSE
 #
 # This tool uses ffmpeg and AtomicParsely, make sure these tools are installed into your $PATH
-# Written to accomodate the particularities of the Sony Walkman NW-E394 portable music player
-# This is an real-life example of what the database will expect in an program
+# Written to accommodate the particularities of the Sony Walkman NW-E394 portable music player
+# This is a real-life example of what the database will expect in an program
 # The input file is always a .wav file independent of what the database contains
 # meta.json and covers.json are always passed as well
-
+import os
 import subprocess
 import json
+import tempfile
 from datetime import datetime
 import sys
-
+from typing import Sequence
+import argparse
 
 def get_m4a_year(s):
     if s.isdecimal(): 
@@ -42,16 +44,6 @@ vorbis_mapping = {
     "DATE": get_m4a_year,
 }
 
-input_path = sys.argv[1]
-output_path = sys.argv[2]
-meta_json = sys.argv[3]
-covers_json = sys.argv[4]
-
-for arg_pos, arg in enumerate([input_path, output_path, meta_json, covers_json]):
-    if arg is None:
-        print(f"Argument {arg_pos} are missing")
-        sys.exit(1)
-
 def check_meta(meta):
     if not isinstance(meta, dict): return False
     if "tags" not in meta: return False
@@ -61,99 +53,197 @@ def check_meta(meta):
     if any(not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(i, str) for i in v) for k, v in meta["tags"].items()): return False
     return True
 
+def check_cover_entry(entry):
+    if not isinstance(entry, dict): return False
+    if "path" not in entry: return False
+    if not isinstance(entry["path"], str): return False
+    if "size" in entry:
+        size = entry["size"]
+        if not isinstance(size, list) or len(size) < 1 or len(size) > 2: return False
+        if len(size) == 1: size = [size[0], size[0]]
+        if size[0] is None: return False
+        if size[1] is None: size[1] = size[0]
+        if not all(isinstance(i, int) and i > 0 for i in size): return False
+        entry["size"] = size
+        return True
+    else:
+        return False
+
 def check_cover(covers):
     if not isinstance(covers, dict): return False
     if "covers" not in covers: return False
     if "version" not in covers: return False
     if "policy" not in covers: return False
-    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in covers["covers"].items()): return False
+    if any(not isinstance(k, str) or not k.isdecimal() or not check_cover_entry(v) for k, v in covers["covers"].items()): return False
     return True
+
+def format_cover(cover_file_in: str, cover_file_out: str, dimension: Sequence[int]=(150, 150)):
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                cover_file_in,
+                "-c:v",
+                "mjpeg",
+                "-vf",
+                f"scale={dimension[0]}:{dimension[1]},format=yuv420p",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                cover_file_out
+             ],
+            text=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            check=True,
+        )
+    except Exception as e:
+        print(f"Conversion to JPEG failed due to {e}", file=sys.stderr)
+        sys.exit(1)
+
+def make_audio(input_file: str, output_file: str):
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                input_file,
+                "-c:a",
+                "aac",
+                "-vn",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                output_file
+            ],
+            check=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            text=True)
+    except Exception as e:
+        print(f"Conversion to M4A file failed due to {e}", file=sys.stderr)
+        sys.exit(1)
+
+def attach_tags(output_file: str, tags: dict[str, list[str]], concat_str: str):
+    atomic_parsely_command = [
+        "AtomicParsley",
+        output_file,
+        "--overWrite",
+        "--encodingTool",
+        "",
+        "--encodedBy",
+        ""
+    ]
+    for key, tag_list in tags.items():
+        tag = concat_str.join(tag_list)
+        key = key.upper()
+        transform = vorbis_mapping.get(key, None)
+        if transform:
+            cli_params = transform(tag)
+            if cli_params:
+                atomic_parsely_command.extend(cli_params)
+    try:
+        subprocess.run(
+            atomic_parsely_command,
+            check=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            text=True
+        )
+    except Exception as e:
+        print(f"Tagging with AtomicParsley failed due to {e}", file=sys.stderr)
+        sys.exit(1)
+
+def attach_cover(output_file: str, cover_file: str):
+    atomic_parsely_command = [
+        "AtomicParsley",
+        output_file,
+        "--overWrite",
+        "--artwork",
+        cover_file
+    ]
+    try:
+        subprocess.run(
+            atomic_parsely_command,
+            check=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            text=True
+        )
+    except Exception as e:
+        print(f"Attaching cover art with AtomicParsley failed due to {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 class UnexpectedFormatException(Exception):
     pass
 
-try:
-    with open(meta_json, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-        if not check_meta(meta): raise UnexpectedFormatException("the meta.json did not conform to the expected format")
-except Exception as e:
-    print(f"Parsing of meta.json (arg 3) file failed due to {e}")
+def parse_meta_json(meta_json):
+    try:
+        with open(meta_json, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+            if not check_meta(meta):
+                raise UnexpectedFormatException("the meta.json did not conform to the expected format, please consult the README.md")
+            else:
+                return meta
+    except Exception as e:
+        print(f"Parsing of meta.json (arg 3) file failed due to {e}", file=sys.stderr)
 
-try:
-    with open(covers_json, "r", encoding="utf-8") as f:
-        covers = json.load(f)
-        if not check_cover(covers): raise UnexpectedFormatException("the covers.json did not conform to the expected format")
-except Exception as e:
-    print(f"Parsing of covers.json (arg 4) file failed due to {e}")
+def parse_cover_json(covers_json):
+    try:
+        with open(covers_json, "r", encoding="utf-8") as f:
+            covers = json.load(f)
+            if not check_cover(covers):
+                raise UnexpectedFormatException("the covers.json did not conform to the expected format, please consult the README.md")
+            else:
+                return covers
+    except Exception as e:
+        print(f"Parsing of covers.json (arg 4) file failed due to {e}", file=sys.stderr)
 
-meta_policy = meta["policy"]
-concat_policy = meta_policy.get("concat", (True, " & "))
-concat_char = concat_policy[1] if concat_policy[0] else " & "
+arg_parser = argparse.ArgumentParser("Convert any media file into a Walkman NW-E394 compatible M4A file")
 
-covers_policy = covers["policy"]
-cover_size = covers_policy.get("size", (150, 150))
-mandatory_cover = covers_policy.get("mandatory", [3])[0]
-mandatory_cover_path = covers["covers"].get(mandatory_cover, None)
+arg_parser.add_argument("input_file", help="Input file")
+arg_parser.add_argument("output_file", help="Output file")
+arg_parser.add_argument("meta_json", nargs="?", default=None, help="Meta JSON file")
+arg_parser.add_argument("covers_json", nargs="?", default=None, help="Covers JSON file")
 
-has_cover = mandatory_cover_path is not None
+args = arg_parser.parse_args()
 
-args_list = [
-    "ffmpeg",
-    "-i",
-    input_path,
-    "-c:a",
-    "aac"
-]
-
-if has_cover:
-    args_list.extend([
-        "-i", 
-        mandatory_cover_path,
-        "-c:v",
-        "mjpeg",
-        "-vf",
-        f"scale={cover_size[0]}:{cover_size[1]},format=yuv420p",
-        "-disposition:v:0",
-        "attached_pic",
-    ])
+if args.meta_json:
+    meta = parse_meta_json(args.meta_json)
+    meta_policy = meta["policy"]
+    concat_policy = meta_policy.get("concat", (True, " & "))
+    concat_char = concat_policy[1] if concat_policy[0] else " & "
 else:
-    args_list.append("-vn")
+    meta = None
+    concat_char = None
 
-args_list.append(output_path)
+if args.covers_json:
+    covers = parse_cover_json(args.covers_json)
+    covers_policy = covers["policy"]
+    mandatory_cover_apic = covers_policy.get("mandatory", ["3"])[0]
+    mandatory_cover = covers["covers"].get(mandatory_cover_apic, None)
+    has_cover = mandatory_cover is not None
+else:
+    has_cover = False
+    mandatory_cover = None
 
-try:
-    subprocess.run(
-        args_list,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-except Exception as e:
-    print(f"FFmpeg failed due to {e}")
-    sys.exit(1)
-
-metadata_args = [
-    "AtomicParsely",
-    output_path
-]
-
-for key, tag_list in meta["tags"].items():
-    tag = concat_char.join(tag_list)
-    transform = vorbis_mapping.get(key, None)
-    if transform:
-        cli_params = transform(tag)
-        if cli_params:
-            metadata_args.extend(cli_params)
-
-try:
-    subprocess.run(
-        metadata_args,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-except Exception as e:
-    print(f"AtomicParsely failed due to {e}")
-    sys.exit(1)
+input_path = args.input_file
+output_path = args.output_file
+with tempfile.TemporaryDirectory() as tmp_dir:
+    make_audio(input_path, output_path)
+    if has_cover:
+        tmp_jpeg = os.path.join(tmp_dir, "tmp.jpeg")
+        format_cover(mandatory_cover["path"], tmp_jpeg, mandatory_cover["size"])
+        attach_cover(output_path, tmp_jpeg)
+    else:
+        print("No covers attached")
+    if meta is not None:
+        attach_tags(output_path, meta, concat_char)
+    else:
+        print("No tags attached")
