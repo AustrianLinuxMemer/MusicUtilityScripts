@@ -45,7 +45,7 @@ A `COVERS_JSON`, also referenced as a `covers.json` is structured like this:
 The policy object is used to pass additional info to the tool about how to format the image files. Version `1.0` supports these fields:
 
 - `mandatory` (Optional): Is an array containing ALL ID3 APIC image keys that HAVE to be included into the output file
-
+- `format` (Optional): Is a MIME string directing which image file format to use for embedding covers. Each tool is supposed to provide a default image format but should also respect this override
 
 ## Cover object:
 

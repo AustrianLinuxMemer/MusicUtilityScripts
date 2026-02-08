@@ -1,30 +1,31 @@
 ########################################
-# convert.py
+# nw_e394.py
 #
 # (C) Leo Füreder
 # licensed to you under the terms of the LGPL, see LICENSE
 #
 # This tool uses ffmpeg and AtomicParsely, make sure these tools are installed into your $PATH
 # Written to accommodate the particularities of the Sony Walkman NW-E394 portable music player
-# This is a real-life example of what the database will expect in an program
+# This is a real-life example of what the database will expect in a program
 # The input file is always a .wav file independent of what the database contains
 # meta.json and covers.json are always passed as well
+
+
 import os
 import subprocess
-import json
 import tempfile
 from datetime import datetime
 import sys
 from typing import Sequence
 import argparse
-
+import metaparser
 def get_m4a_year(s):
     if s.isdecimal(): 
         return ["--year", s]
     try:
         datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
         return ["--year", s]
-    except Exception:
+    except ValueError:
         return None
 
 def get_tracknum(s):
@@ -43,39 +44,6 @@ vorbis_mapping = {
     "GENRE": lambda s: ["--genre", s],
     "DATE": get_m4a_year,
 }
-
-def check_meta(meta):
-    if not isinstance(meta, dict): return False
-    if "tags" not in meta: return False
-    if "version" not in meta: return False
-    if "policy" not in meta: return False
-    if not isinstance(meta["tags"], dict): return False
-    if any(not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(i, str) for i in v) for k, v in meta["tags"].items()): return False
-    return True
-
-def check_cover_entry(entry):
-    if not isinstance(entry, dict): return False
-    if "path" not in entry: return False
-    if not isinstance(entry["path"], str): return False
-    if "size" in entry:
-        size = entry["size"]
-        if not isinstance(size, list) or len(size) < 1 or len(size) > 2: return False
-        if len(size) == 1: size = [size[0], size[0]]
-        if size[0] is None: return False
-        if size[1] is None: size[1] = size[0]
-        if not all(isinstance(i, int) and i > 0 for i in size): return False
-        entry["size"] = size
-        return True
-    else:
-        return False
-
-def check_cover(covers):
-    if not isinstance(covers, dict): return False
-    if "covers" not in covers: return False
-    if "version" not in covers: return False
-    if "policy" not in covers: return False
-    if any(not isinstance(k, str) or not k.isdecimal() or not check_cover_entry(v) for k, v in covers["covers"].items()): return False
-    return True
 
 def format_cover(cover_file_in: str, cover_file_out: str, dimension: Sequence[int]=(150, 150)):
     try:
@@ -183,28 +151,6 @@ def attach_cover(output_file: str, cover_file: str):
 class UnexpectedFormatException(Exception):
     pass
 
-def parse_meta_json(meta_json):
-    try:
-        with open(meta_json, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-            if not check_meta(meta):
-                raise UnexpectedFormatException("the meta.json did not conform to the expected format, please consult the README.md")
-            else:
-                return meta
-    except Exception as e:
-        print(f"Parsing of meta.json (arg 3) file failed due to {e}", file=sys.stderr)
-
-def parse_cover_json(covers_json):
-    try:
-        with open(covers_json, "r", encoding="utf-8") as f:
-            covers = json.load(f)
-            if not check_cover(covers):
-                raise UnexpectedFormatException("the covers.json did not conform to the expected format, please consult the README.md")
-            else:
-                return covers
-    except Exception as e:
-        print(f"Parsing of covers.json (arg 4) file failed due to {e}", file=sys.stderr)
-
 arg_parser = argparse.ArgumentParser("Convert any media file into a Walkman NW-E394 compatible M4A file")
 
 arg_parser.add_argument("input_file", help="Input file")
@@ -215,7 +161,7 @@ arg_parser.add_argument("covers_json", nargs="?", default=None, help="Covers JSO
 args = arg_parser.parse_args()
 
 if args.meta_json:
-    meta = parse_meta_json(args.meta_json)
+    meta = metaparser.parse_meta_json(args.meta_json, {"concat": (True, " & ")})
     meta_policy = meta["policy"]
     concat_policy = meta_policy.get("concat", (True, " & "))
     concat_char = concat_policy[1] if concat_policy[0] else " & "
@@ -224,7 +170,7 @@ else:
     concat_char = None
 
 if args.covers_json:
-    covers = parse_cover_json(args.covers_json)
+    covers = metaparser.parse_cover_json(args.covers_json, {"size": (150, 150)})
     covers_policy = covers["policy"]
     mandatory_cover_apic = covers_policy.get("mandatory", ["3"])[0]
     mandatory_cover = covers["covers"].get(mandatory_cover_apic, None)
