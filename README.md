@@ -46,6 +46,9 @@ The policy object is used to pass additional info to the tool about how to forma
 
 - `mandatory` (Optional): Is an array containing ALL ID3 APIC image keys that HAVE to be included into the output file
 - `format` (Optional): Is a MIME string directing which image file format to use for embedding covers. Each tool is supposed to provide a default image format but should also respect this override
+- `size`: An array of integers of either size 1 or size 2, all other sizes are rejected
+  - `[0]`: Width of the image, Required, Cannot be null
+  - `[1]` (optional): Height of the image, if omitted or null, Width is used
 
 ## Cover object:
 
